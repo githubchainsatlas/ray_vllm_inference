@@ -60,7 +60,7 @@ class PromptFormat(BaseModel):
         ), "user must be a string containing '{instruction}'"
         return value
 
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def check_user_system_in_user(cls, values):
         if values["system_in_user"]:
             assert (

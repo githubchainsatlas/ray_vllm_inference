@@ -28,8 +28,7 @@ def create_error_response(status_code: HTTPStatus,
     return JSONResponse(status_code=status_code.value, content={"detail":message})
 
 @serve.deployment(name='VLLMInference', 
-                  num_replicas=1, 
-                  max_concurrent_queries=10,
+                  num_replicas=1,
                   ray_actor_options={"num_gpus": 1.0})
 @serve.ingress(app)
 class VLLMGenerateDeployment:
