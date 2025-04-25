@@ -46,6 +46,7 @@ Install in develop mode:
 Lauch the service with a `facebook/opt-125m` model from HuggingFace:
 
     serve run ray_vllm_inference.vllm_serve:deployment model="facebook/opt-125m"
+    serve run ray_vllm_inference.vllm_serve:deployment model="Qwen/Qwen2.5-0.5B-Instruct" tensor_parallel_size=2
 
 This command launches a local Ray cluster, downloads the model from HuggingFace and starts a Ray Serve instance on localhost port 8000.
 
