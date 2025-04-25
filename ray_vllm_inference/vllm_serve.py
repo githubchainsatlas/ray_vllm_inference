@@ -48,13 +48,16 @@ def create_error_response(status_code: HTTPStatus,
 
 @serve.deployment(name='VLLMInference', 
                   num_replicas=1,
-                  ray_actor_options={"num_gpus": 1.0})
+                  ray_actor_options={"num_gpus": 2.0})
 @serve.ingress(app)
 class VLLMGenerateDeployment:
     def __init__(self, **kwargs):
         """
         Construct a VLLM deployment.
         """
+        if 'tensor_parallel_size' in kwargs and isinstance(kwargs['tensor_parallel_size'], str):
+            kwargs['tensor_parallel_size'] = int(kwargs['tensor_parallel_size'])
+
         args = AsyncEngineArgs(**kwargs)
         logger.info(f"Initializing with args: {args}")
         self.engine = AsyncLLMEngine.from_engine_args(args)
