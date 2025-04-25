@@ -1,5 +1,5 @@
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import List, Optional, Union
+from pydantic import BaseModel, Field, validator
 from ray_vllm_inference.prompt_format import Message
 
 class GenerateRequest(BaseModel):
@@ -18,12 +18,24 @@ class GenerateRequest(BaseModel):
         Note that vLLM supports many more sampling parameters that are ignored here.
         See: vllm/sampling_params.py in the vLLM repository.
         """
-    prompt: Optional[str]
-    messages: Optional[List[Message]]
+    prompt: Optional[str] = None
+    messages: Optional[List[Message]] = None
     stream: Optional[bool] = False
     max_tokens: Optional[int] = 128
     temperature: Optional[float] = 0.7
     ignore_eos: Optional[bool] = False
+    
+    @validator('prompt', 'messages')
+    def validate_prompt_or_messages(cls, v, values):
+        # Make sure either prompt or messages is provided
+        if 'prompt' in values and not values['prompt'] and 'messages' in values and not values['messages']:
+            if v is None:
+                raise ValueError("Either 'prompt' or 'messages' must be provided")
+        return v
+    
+    class Config:
+        # Allow extra fields to be more tolerant of client implementations
+        extra = "ignore"
 
 class GenerateResponse(BaseModel):
     """Generate completion response.
