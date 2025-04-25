@@ -46,11 +46,7 @@ def create_error_response(status_code: HTTPStatus,
                           message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code.value, content={"detail":message})
 
-@serve.deployment(name='VLLMInference', 
-                  num_replicas=1,
-                  ray_actor_options={"num_gpus": 2.0})
-@serve.ingress(app)
-class VLLMGenerateDeployment:
+class VLLMInferenceBase:
     def __init__(self, **kwargs):
         """
         Construct a VLLM deployment.
@@ -120,13 +116,7 @@ class VLLMGenerateDeployment:
     async def _abort_request(self, request_id) -> None:
         await self.engine.abort(request_id)
 
-    @app.get("/health")
-    async def health(self) -> Response:
-        """Health check."""
-        return Response(status_code=200)
-
-    @app.post("/generate")
-    async def generate(self, request_raw: FastAPIRequest) -> Response:
+    async def generate_response(self, request_raw: FastAPIRequest) -> Response:
         """Generate completion for the request."""
         try:
             # Log raw request data for debugging
@@ -242,5 +232,75 @@ class VLLMGenerateDeployment:
             logger.error('Error in generate()', exc_info=1)
             raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, f'Server error: {str(e)}')
 
+# First model deployment - Qwen2.5-0.5B-Instruct
+@serve.deployment(name='VLLMInstructModel', 
+                 num_replicas=1,
+                 ray_actor_options={"num_gpus": 1.0})
+@serve.ingress(app)
+class VLLMInstructDeployment(VLLMInferenceBase):
+    @app.get("/health")
+    async def health(self) -> Response:
+        """Health check."""
+        return Response(status_code=200)
+
+    @app.post("/generate")
+    async def generate(self, request_raw: FastAPIRequest) -> Response:
+        """Generate completion for the request."""
+        return await self.generate_response(request_raw)
+
+# Second model deployment - Qwen2.5-0.5B (base model)
+app2 = FastAPI()
+
+@app2.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=HTTPStatus.BAD_REQUEST.value,
+        content={"detail": f"Error parsing JSON payload: {str(exc)}"}
+    )
+
+@app2.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.error(f"Unhandled exception: {str(exc)}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, 
+        content={"detail": f"Server error: {str(exc)}"}
+    )
+
+@serve.deployment(name='VLLMBaseModel', 
+                 num_replicas=1,
+                 ray_actor_options={"num_gpus": 1.0})
+@serve.ingress(app2)
+class VLLMBaseDeployment(VLLMInferenceBase):
+    @app2.get("/health")
+    async def health(self) -> Response:
+        """Health check."""
+        return Response(status_code=200)
+
+    @app2.post("/generate")
+    async def generate(self, request_raw: FastAPIRequest) -> Response:
+        """Generate completion for the request."""
+        return await self.generate_response(request_raw)
+
 def deployment(args: Dict[str, str]) -> Application:
-    return VLLMGenerateDeployment.bind(**args)
+    # Only use the first model (VLLMInstructDeployment)
+    # We'll specify the base model in a separate command
+    model_args = args.copy()
+    if "model" not in model_args:
+        model_args["model"] = "Qwen/Qwen2.5-0.5B-Instruct"
+    if "tensor_parallel_size" not in model_args:
+        model_args["tensor_parallel_size"] = 1
+    
+    # Just return the single deployment for now
+    return VLLMInstructDeployment.bind(**model_args)
+
+def deployment_base(args: Dict[str, str]) -> Application:
+    # Only use the second model (VLLMBaseDeployment)
+    model_args = args.copy()
+    if "model" not in model_args:
+        model_args["model"] = "Qwen/Qwen2.5-0.5B"
+    if "tensor_parallel_size" not in model_args:
+        model_args["tensor_parallel_size"] = 1
+    
+    # Just return the single deployment
+    return VLLMBaseDeployment.bind(**model_args)
