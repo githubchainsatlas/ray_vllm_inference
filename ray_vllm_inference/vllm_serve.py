@@ -64,6 +64,7 @@ class VLLMGenerateDeployment:
 
         # Log tokenizer type for debugging
         logger.info(f"Tokenizer type: {type(self.tokenizer).__name__}")
+        logger.info(f"AsyncLLMEngine type: {type(self.engine).__name__}")
         
         try:
             self.model_config = load_model_config(args.model)
@@ -75,39 +76,31 @@ class VLLMGenerateDeployment:
     def _next_request_id(self):
         return str(uuid.uuid1().hex)
 
-    def _check_length(self, prompt:str, request:GenerateRequest) -> List[int]:
-        # Use the correct tokenization method for vLLM's TokenizerGroup
-        logger.debug(f"Tokenizing prompt: {prompt[:50]}...")
-        
+    def _check_length(self, prompt:str, request:GenerateRequest) -> int:
+        """Check if the prompt length is within the model's context length."""
         try:
-            # Use the vLLM engine's tokenize method directly - this is the safest approach
+            # First try using the engine's tokenize method
             input_ids = self.engine.engine.tokenize([prompt])[0]
-            logger.debug(f"Tokenization successful, got {len(input_ids)} tokens")
+            token_num = len(input_ids)
+            logger.debug(f"Tokenization successful, got {token_num} tokens")
         except Exception as e:
-            logger.error(f"Engine tokenization failed: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Fallback to TokenizerGroup's encode without parameters
-            try:
-                input_ids = self.tokenizer.encode(prompt)
-                logger.debug(f"Fallback tokenization successful, got {len(input_ids)} tokens")
-            except Exception as e2:
-                logger.error(f"Fallback tokenization failed: {str(e2)}")
-                logger.error(traceback.format_exc())
-                raise ValueError(f"Failed to tokenize input: {str(e2)}")
+            logger.error(f"Error tokenizing with engine: {e}")
+            # Fallback: just estimate token count using simple heuristic
+            token_num = len(prompt.split())
+            logger.warning(f"Using estimated token count: {token_num}")
         
-        token_num = len(input_ids)
-
         if request.max_tokens is None:
             request.max_tokens = self.max_model_len - token_num
+        
         if token_num + request.max_tokens > self.max_model_len:
             raise ValueError(
             f"This model's maximum context length is {self.max_model_len} tokens. "
             f"However, you requested {request.max_tokens + token_num} tokens "
-            f"({token_num} in the messages, "
+            f"({token_num} in the prompt, "
             f"{request.max_tokens} in the completion). "
-            f"Please reduce the length of the messages or completion.")
-        return input_ids
+            f"Please reduce the length of the prompt or completion.")
+        
+        return token_num
 
     async def _stream_results(self, output_generator) -> AsyncGenerator[bytes, None]:
         num_returned = 0
@@ -171,44 +164,60 @@ class VLLMGenerateDeployment:
                 else:
                     return create_error_response(HTTPStatus.BAD_REQUEST, 'Parameter "messages" requires a model config')
 
-            logger.debug(f"About to tokenize prompt: {prompt[:50]}...")
+            logger.debug(f"Processing prompt: {prompt[:50]}...")
             
             try:
-                prompt_token_ids = self._check_length(prompt, request)
-                logger.debug(f"Tokenization complete, got {len(prompt_token_ids)} tokens")
+                # Check length but we don't need token IDs anymore
+                token_num = self._check_length(prompt, request)
+                logger.debug(f"Token count: {token_num}")
             except Exception as e:
-                logger.error(f"Error in tokenization: {str(e)}")
+                logger.error(f"Error checking length: {str(e)}")
                 return create_error_response(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
-                    f"Tokenization error: {str(e)}"
+                    f"Error checking prompt length: {str(e)}"
                 )
 
             request_dict = request.dict(exclude=set(['prompt', 'messages', 'stream']))
-
             sampling_params = SamplingParams(**request_dict)
             request_id = self._next_request_id()
 
-            # Use explicit engine.generate method to avoid errors
-            output_generator = self.engine.generate(
-                prompt=None,
-                sampling_params=sampling_params, 
-                request_id=request_id, 
-                prompt_token_ids=prompt_token_ids
-            )
+            # Use the correct API for AsyncLLMEngine.generate
+            # Pass the prompt directly instead of prompt_token_ids
+            try:
+                logger.debug(f"Calling engine.generate with prompt and parameters")
+                output_generator = self.engine.generate(
+                    prompt=prompt,  # Use the text prompt directly
+                    sampling_params=sampling_params,
+                    request_id=request_id
+                )
+            except Exception as e:
+                logger.error(f"Error in engine.generate: {str(e)}")
+                logger.error(traceback.format_exc())
+                return create_error_response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    f"Error generating response: {str(e)}"
+                )
             
             if request.stream:
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(self._abort_request, request_id)
                 return StreamingResponse(self._stream_results(output_generator), 
                                         background=background_tasks)
-
             else:
                 final_output = None
-                async for request_output in output_generator:
-                    if await request_raw.is_disconnected():
-                        await self.engine.abort(request_id)
-                        return Response(status_code=200)
-                    final_output = request_output
+                try:
+                    async for request_output in output_generator:
+                        if await request_raw.is_disconnected():
+                            await self.engine.abort(request_id)
+                            return Response(status_code=200)
+                        final_output = request_output
+                except Exception as e:
+                    logger.error(f"Error in processing generator: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    return create_error_response(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        f"Error processing response: {str(e)}"
+                    )
 
                 if final_output is None:
                     return create_error_response(
