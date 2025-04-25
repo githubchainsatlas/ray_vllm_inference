@@ -35,7 +35,7 @@ Install from Github:
 
 Install in develop mode:
 
-    git clone https://github.com/asprenger/ray_vllm_inference
+    git clone https://github.com/githubchainsatlas/ray_vllm_inference
     cd ray_vllm_inference
     pip install -e .
 
